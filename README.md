@@ -74,7 +74,7 @@ The configuration of a run should be specified in a yaml file (an example can be
   - **bf16**: Whether to use bf16 training.
   - **train_path**: Path to the training set.
   - **val_path**: Path to the validation or test set (depending on `only_eval`)
-  - **reset_optimizer**: Whether to reset the optimizer when swtiching training stages.
+  - **reset_optimizer**: Whether to reset the optimizer when switching training stages.
   - **batch_size_training**: Batch size to train the model per GPU.
   - **debug**: If true, there is no wandb and model saving. A subset of data will be used.
   - **gradient_accumulation_steps**: Gradient accumulation steps
