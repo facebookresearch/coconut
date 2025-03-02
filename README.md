@@ -183,3 +183,48 @@ If you use this code base in your research, please cite our paper with the follo
 
 ## License
 This code is released under the MIT license (see [LICENSE](LICENSE)).
+
+
+Here's the tree structure with a brief purpose for each main function and component:
+
+project_root/
+│
+├── main.py
+│   ├── main(): Orchestrates the entire training and evaluation process
+│   ├── parse_args(): Parses command-line arguments for configuration file
+│   ├── setup_distributed(): Initializes distributed training environment
+│   ├── load_config(): Loads and parses the YAML configuration file
+│   ├── set_random_seed(): Sets random seed for reproducibility
+│   ├── load_model_and_tokenizer(): Loads pretrained model and tokenizer
+│   ├── setup_coconut_model(): Wraps base model in Coconut wrapper if specified
+│   ├── setup_fsdp_model(): Applies FSDP or DDP to the model for distributed training
+│   ├── prepare_datasets(): Loads and prepares training and validation datasets
+│   ├── train(): Executes main training loop, including forward/backward passes
+│   └── evaluate(): Generates answers and calculates accuracy metrics
+│
+├── configs/
+│   └── config.yaml: Configuration file for experiment settings
+│
+├── src/
+│   ├── model/
+│   │   ├── coconut.py: Contains Coconut model wrapper for latent space modeling
+│   │   └── model_utils.py: Utility functions for model setup and token handling
+│   │
+│   ├── data/
+│   │   ├── dataset.py: Functions for dataset loading and preparation
+│   │   └── collator.py: Custom collator for batching and padding
+│   │
+│   ├── training/
+│   │   ├── trainer.py: Contains training loop and checkpoint saving logic
+│   │   └── optimizer.py: Defines and configures the optimizer
+│   │
+│   ├── evaluation/
+│   │   └── evaluator.py: Functions for generating answers and calculating metrics
+│   │
+│   └── utils/
+│       ├── distributed.py: Utilities for distributed training setup
+│       └── logging.py: Functions for setting up logging with Weights & Biases
+│
+└── scripts/
+    └── run_training.sh: Shell script to initiate the training process
+
