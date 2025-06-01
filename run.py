@@ -150,7 +150,7 @@ def main():
         # initialize the new token embeddings with a known token
         # it helps stablize the training
         for token_id in [latent_id, start_id, end_id]:
-            target_embedding = embeddings.weight.data[token_id]
+            target_embedding = embeddings.weight.data[target_id]  #The earlier code was not initializing the target_embedding with the embedding of "<<" 
             embeddings.weight.data[token_id] = target_embedding
             # The input embeddings and lm heads are tied in GPT2. So the code below is not necessary
             lm_head = model.lm_head
