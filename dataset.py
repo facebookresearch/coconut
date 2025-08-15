@@ -37,7 +37,7 @@ def get_dataset(path, tokenizer, max_size=1000000000):
         }
         return sample
 
-    data = json.load(open(path))[:max_size]
+    data = json.load(open(path, "r", encoding="utf-8"))[:max_size]
     data = [{**d, "idx": idx} for idx, d in enumerate(data)]
 
     keys = data[0].keys()
