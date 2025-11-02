@@ -62,7 +62,7 @@ def main():
         world_size = 1
 
     # load the configuration file
-    with open("/Users/Patron/PycharmProjects/coconut/args/gsm_grpo.yaml") as f:
+    with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
 
     if rank == 0:

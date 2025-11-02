@@ -119,14 +119,14 @@ def compute_grpo_reward(
 # Define reward function for GRPO
 # GRPO calls reward function with keyword arguments:
 # reward_func(prompts=prompts, completions=completions, completion_ids=completion_ids_list, **reward_kwargs)
-def reward_function(prompts, completions, answer, completion_ids=None, **kwargs):
+def reward_function(prompts, completions, *, answer, completion_ids=None, **kwargs):
         """
         Compute rewards for generated completions.
         
         Args:
             prompts: list of input prompt strings
             completions: list of generated completion strings
-            answers: list of ground truth answer strings
+            answer: list of ground truth answer strings
             completion_ids: list of token IDs for completions (optional)
             **kwargs: additional arguments (e.g., trainer_state)
             
@@ -134,21 +134,46 @@ def reward_function(prompts, completions, answer, completion_ids=None, **kwargs)
             list[float]: Reward scores for each completion
         """
         rewards = []
+        answer_rewards = []
+        format_rewards = []
         
         # Match each completion with its ground truth
-        for idx, (prompt, completion, answer) in enumerate(zip(prompts, completions, answer)):
-            # Find which training example this prompt corresponds to
-            # Since GRPO generates multiple samples per prompt, we need to map back
-            ground_truth = answer
+        for idx, (prompt, completion, gt_answer) in enumerate(zip(prompts, completions, answer)):
+            # Extract predicted answer (after ###)
+            if "###" in completion:
+                predicted_answer = completion.split("###")[-1].strip()
+            else:
+                # If no ### marker, try to get the last line
+                predicted_answer = completion.strip().split("\n")[-1].strip()
             
-            # Compute reward
-            reward = compute_grpo_reward(
-                completion,
-                ground_truth,
-                reward_weight_final_answer=1,
-                reward_weight_format=.1,
-            )
+            # Compute individual reward components
+            answer_reward = compute_final_answer_reward(predicted_answer, gt_answer)
+            format_reward = compute_format_reward(completion)
+            
+            # Compute total reward
+            reward = 1.0 * answer_reward + 0.1 * format_reward
+            
             rewards.append(reward)
+            answer_rewards.append(answer_reward)
+            format_rewards.append(format_reward)
+            
+            # Print first few examples for debugging
+            if idx < 3:
+                print(f"\n=== Reward Debug (sample {idx}) ===")
+                print(f"Prompt: {prompt[:100]}...")
+                print(f"Completion: {completion[:200]}...")
+                print(f"Ground truth: {gt_answer}")
+                print(f"Predicted: {predicted_answer}")
+                print(f"Answer reward: {answer_reward}, Format reward: {format_reward}, Total: {reward}")
+        
+        # Print aggregate statistics
+        if len(rewards) > 0:
+            import numpy as np
+            print(f"\n=== Batch Reward Statistics ===")
+            print(f"Mean answer reward: {np.mean(answer_rewards):.4f}")
+            print(f"Mean format reward: {np.mean(format_rewards):.4f}")
+            print(f"Mean total reward: {np.mean(rewards):.4f}")
+            print(f"Answer correct rate: {sum(r > 0.5 for r in answer_rewards) / len(answer_rewards):.2%}")
         
         return rewards
 
