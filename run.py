@@ -438,6 +438,8 @@ def main():
             torch.tensor(0, device=local_rank),
             torch.tensor(0, device=local_rank),
         )
+        pass_at_k_correct = torch.tensor(0, device=local_rank)
+        num_samples_per_problem = 20  # for pass@20
 
         with torch.no_grad():
             parallel_model.module.eval()
@@ -482,28 +484,57 @@ def main():
                 cor += answer_output == answer
                 cor_cot += cot_output == answer_cot
 
+                # Calculate pass@20: generate multiple samples and check if any is correct
+                problem_solved = False
+                for sample_idx in range(num_samples_per_problem):
+                    sample_outputs = parallel_model.module.generate(
+                        **batch,
+                        max_new_tokens=max_new_tokens,
+                        synced_gpus=not configs.only_eval,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.95,
+                    )
+                    sample_text = tokenizer.decode(sample_outputs[0], skip_special_tokens=True)
+                    sample_answer = sample_text.split("#")[-1].replace(",", "").strip()
+                    
+                    if sample_answer == answer:
+                        problem_solved = True
+                        break  # At least one correct answer found
+                
+                pass_at_k_correct += int(problem_solved)
+
                 pbar.update(1)
                 pbar.set_description(
-                    f"Test accuracy: {round(float(cor.detach().float() / total.detach().float()), 2)}"
+                    f"Test accuracy: {round(float(cor.detach().float() / total.detach().float()), 2)} "
+                    f"Pass@20: {round(float(pass_at_k_correct.detach().float() / total.detach().float()), 2)}"
                 )
 
             pbar.close()
-            print(f"Device {rank}: Cor={cor}, CoT={cor_cot}, Total={total}")
+            print(f"Device {rank}: Cor={cor}, CoT={cor_cot}, Total={total}, Pass@20={pass_at_k_correct}")
 
         dist.all_reduce(cor_cot, op=dist.ReduceOp.SUM)
         dist.all_reduce(cor, op=dist.ReduceOp.SUM)
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
+        dist.all_reduce(pass_at_k_correct, op=dist.ReduceOp.SUM)
 
         cor_cot = cor_cot.item()
         cor = cor.item()
         total = total.item()
+        pass_at_k_correct = pass_at_k_correct.item()
+        
         if rank == 0:
             print(f"Accuracy on validation set: {cor} / {total} = {cor/total}")
             print(f"CoT match on validation set: {cor_cot} / {total} = {cor_cot/total}")
+            print(f"Pass@20 on validation set: {pass_at_k_correct} / {total} = {pass_at_k_correct/total}")
         sys.stdout.flush()
 
         if wandb_run:
-            wandb_run.log({"eval/acc": cor / total, "eval/cot_em": cor_cot / total})
+            wandb_run.log({
+                "eval/acc": cor / total, 
+                "eval/cot_em": cor_cot / total,
+                "eval/pass@20": pass_at_k_correct / total
+            })
 
         if configs.only_eval:
             break
