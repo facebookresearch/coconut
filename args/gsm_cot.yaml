@@ -4,7 +4,7 @@ project: coconut
 save_path: batch_size_32
 name: gsm-cot
 
-only_eval: False
+only_eval: True
 
 coconut: False
 cot: True
@@ -20,7 +20,7 @@ pad_latent_to_max: True
 save_only_improve: True
 uniform_prob: 0.0
 model_id: openai-community/gpt2
-load_model_path: None
+load_model_path: data/gsm-grpo/checkpoint_22
 seed: 0
 resume: 0
 bf16: false
