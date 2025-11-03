@@ -1,0 +1,64 @@
+# GRPO Training Configuration for GSM8K
+
+project: coconut
+save_path: /u/s/u/sujanreddy/PycharmProjects/coconut/data #TODO update this
+name: gsm-grpo
+
+only_eval: False
+
+# GRPO mode - use base model without coconut wrapper
+coconut: False
+cot: False
+no_thoughts: False
+no_cot: False
+grpo: True
+
+# Not needed for GRPO (no latent thoughts)
+c_thought: 0
+epochs_per_stage: 1
+max_latent_stage: 0
+pad_latent_to_max: False
+
+save_only_improve: False
+uniform_prob: 0.0
+model_id: openai-community/gpt2
+load_model_path: data/gsm-grpo/checkpoint_22
+seed: 0
+resume: 0
+bf16: false
+
+# Data paths
+train_path: data/gsm_train.json
+val_path: data/gsm_valid.json
+
+# Training parameters
+reset_optimizer: False
+batch_size_training: 8
+debug: False # Set to False for real training
+gradient_accumulation_steps: 2
+num_epochs: 1
+lr: !!float "1e-6"  # Increased from 5e-7 - was too low for RL
+weight_decay: 0.01
+
+# GRPO-specific parameters
+max_prompt_length: 1024
+max_completion_length: 256
+num_generations: 8
+temperature: 1.0
+top_p: 1.0
+top_k: null
+beta: 0.01  # Small KL penalty to prevent policy drift (was 0.0)
+num_iterations: 1
+epsilon: 0.2
+max_grad_norm: 0.1
+scale_rewards: "group"
+loss_type: "dapo"
+mask_truncated_completions: false
+shuffle_dataset: true
+max_steps: 500  # Adequate number of steps for training
+logging_steps: 10
+
+# Reward weights
+reward_weight_final_answer: 1.0
+reward_weight_format: 0.1
+

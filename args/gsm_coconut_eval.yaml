@@ -10,6 +10,7 @@ coconut: True
 cot: False
 no_thoughts: False
 no_cot: False
+grpo: False
 
 c_thought: 2
 epochs_per_stage: 3
