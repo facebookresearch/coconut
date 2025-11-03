@@ -4,17 +4,23 @@
 import torch
 import torch.distributed
 import torch.optim as optim
+from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
+from wandb import Table
+from wandb.sdk.wandb_run import Run
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block
+from typing import Any, Literal, NoReturn, Union
+from typing_extensions import LiteralString
 
 from coconut import Coconut
 from dataset import (
@@ -23,6 +29,7 @@ from dataset import (
     get_cot_latent_dataset,
     MyCollator,
 )
+from grpo import train_grpo_style
 
 from tqdm import tqdm
 from copy import copy
@@ -42,12 +49,17 @@ def main():
     parser.add_argument("config_file")
     args = parser.parse_args()
 
-    # init distributed environment
-    dist.init_process_group("nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(local_rank)
+    if torch.cuda.is_available():
+        # init distributed environment
+        dist.init_process_group("nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        torch.cuda.set_device(local_rank)
+    else:
+        local_rank = 0
+        rank = 0
+        world_size = 1
 
     # load the configuration file
     with open(args.config_file) as f:
@@ -63,42 +75,43 @@ def main():
     if not os.path.exists(save_dir) and rank == 0:
         os.makedirs(save_dir)
 
-    torch.distributed.barrier()
+    if torch.cuda.is_available():
+        torch.distributed.barrier()
     cur_ckpts = os.listdir(save_dir)
 
     # check if the job is preempted and resumed.
 
-    if len(cur_ckpts) > 0 and not configs.only_eval:
-        # if there are previous checkpoints, and only_eval is False
-        # it means the previous run was preempted and the program is restarted.
-        # need to find the latest checkpoint and resume from that.
+    # if len(cur_ckpts) > 0 and not configs.only_eval:
+    #     # if there are previous checkpoints, and only_eval is False
+    #     # it means the previous run was preempted and the program is restarted.
+    #     # need to find the latest checkpoint and resume from that.
+    #
+    #     if rank == 0:
+    #         print(
+    #             f"Warning: found previous run and gonna resume from that. the inputted `resume` argument is ignored!"
+    #         )
+    #
+    #     checkpoints = [f for f in cur_ckpts if f.startswith("checkpoint_")]
+    #     checkpoints.sort(key=lambda x: int(x.split("_")[1]))
+    #
+    #     # Get the last item in the sorted list
+    #     latest_checkpoint = checkpoints[-1] if checkpoints else None
+    #     configs.resume = int(latest_checkpoint.split("_")[1])
+    #     load_dir = os.path.join(configs.save_path, configs.name, latest_checkpoint)
+    #
+    #     configs.load_model_path = load_dir
+    #     print(f"Loading from previous run epoch_{configs.resume}!")
 
-        if rank == 0:
-            print(
-                f"Warning: found previous run and gonna resume from that. the inputted `resume` argument is ignored!"
-            )
-
-        checkpoints = [f for f in cur_ckpts if f.startswith("checkpoint_")]
-        checkpoints.sort(key=lambda x: int(x.split("_")[1]))
-
-        # Get the last item in the sorted list
-        latest_checkpoint = checkpoints[-1] if checkpoints else None
-        configs.resume = int(latest_checkpoint.split("_")[1])
-        load_dir = os.path.join(configs.save_path, configs.name, latest_checkpoint)
-
-        configs.load_model_path = load_dir
-        print(f"Loading from previous run epoch_{configs.resume}!")
-
-    elif configs.resume != 0:
-        # by setting `resume`, we can skip a few epoches at the beginning.
-        if configs.load_model_path == "None":
-            print(
-                f"Warning: you want to skip the first {configs.resume} but you are not loading any existing checkpoint!"
-            )
-            # not an intended use case at this point
-        print(
-            f"Loading from {configs.load_model_path} and skip the first {configs.resume} epochs"
-        )
+    # elif configs.resume != 0:
+    #     # by setting `resume`, we can skip a few epoches at the beginning.
+    #     if configs.load_model_path == "None":
+    #         print(
+    #             f"Warning: you want to skip the first {configs.resume} but you are not loading any existing checkpoint!"
+    #         )
+    #         # not an intended use case at this point
+    #     print(
+    #         f"Loading from {configs.load_model_path} and skip the first {configs.resume} epochs"
+    #     )
 
     model = AutoModelForCausalLM.from_pretrained(configs.model_id)
     tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
@@ -142,7 +155,7 @@ def main():
             loaded = True
             print(model.load_state_dict(saved_weights, strict=False))
 
-    if not (configs.cot or configs.no_thoughts or configs.no_cot):
+    if not (configs.cot or configs.no_thoughts or configs.no_cot or configs.grpo):
         # if we need new tokens, initialize their embeddings and lm heads
         model.resize_token_embeddings(len(tokenizer))
         embeddings = model.get_input_embeddings()
@@ -150,7 +163,7 @@ def main():
         # initialize the new token embeddings with a known token
         # it helps stablize the training
         for token_id in [latent_id, start_id, end_id]:
-            target_embedding = embeddings.weight.data[target_id]
+            target_embedding = embeddings.weight.data[target_id] 
             embeddings.weight.data[token_id] = target_embedding
             # The input embeddings and lm heads are tied in GPT2. So the code below is not necessary
             lm_head = model.lm_head
@@ -185,9 +198,14 @@ def main():
         parallel_model = DDP(model, device_ids=[local_rank])
 
     else:
-        parallel_model = FSDP(
-            model, auto_wrap_policy=llama_auto_wrap_policy, device_id=local_rank
-        )
+        # GRPO trainer has a different multi-gpu implementation
+        if not torch.cuda.is_available() or configs.grpo:
+            parallel_model = model
+        else:
+            parallel_model = FSDP(
+                model, auto_wrap_policy=llama_auto_wrap_policy, device_id=local_rank
+            )
+
 
     del model
 
@@ -239,10 +257,12 @@ def main():
 
     collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
 
+
+    # Sujan probably set num_epochs to 1 for grpo for minimal code changes
     for epoch in range(configs.resume, configs.num_epochs):
 
         scheduled_stage = (
-            0 if (configs.cot or configs.no_cot) else epoch // configs.epochs_per_stage
+            0 if (configs.cot or configs.no_cot or configs.grpo) else epoch // configs.epochs_per_stage
         )
         dataset_gen_val = get_question_latent_dataset(
             scheduled_stage,
@@ -251,7 +271,7 @@ def main():
             start_id,
             latent_id,
             end_id,
-            no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
+            no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts or configs.grpo,
         )
 
         valid_gen_dataloader = torch.utils.data.DataLoader(
@@ -260,7 +280,7 @@ def main():
             pin_memory=True,
             batch_size=1,
             collate_fn=collator,
-            sampler=DistributedSampler(dataset_gen_val, shuffle=False),
+            sampler=DistributedSampler(dataset_gen_val, shuffle=False) if torch.cuda.is_available() else None,
         )
 
         if not configs.only_eval:
@@ -272,7 +292,7 @@ def main():
                 start_id,
                 latent_id,
                 end_id,
-                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
+                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts or configs.grpo,
                 shuffle=True,
             )
 
@@ -283,7 +303,7 @@ def main():
                 pin_memory=True,
                 batch_size=configs.batch_size_training,
                 collate_fn=collator,
-                sampler=DistributedSampler(dataset_train, shuffle=True),
+                sampler=DistributedSampler(dataset_train, shuffle=True) if torch.cuda.is_available() else None,
             )
 
             # the sampler is deterministic even if shuffle is set to True
@@ -296,7 +316,7 @@ def main():
                 start_id,
                 latent_id,
                 end_id,
-                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
+                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts or configs.grpo,
             )
 
             valid_loss_dataloader = torch.utils.data.DataLoader(
@@ -306,7 +326,7 @@ def main():
                 pin_memory=True,
                 batch_size=configs.batch_size_training,
                 collate_fn=collator,
-                sampler=DistributedSampler(dataset_loss_val, shuffle=False),
+                sampler=DistributedSampler(dataset_loss_val, shuffle=False) if torch.cuda.is_available() else None,
             )
 
             if configs.reset_optimizer:
@@ -318,7 +338,6 @@ def main():
                     weight_decay=configs.weight_decay,
                 )
 
-            parallel_model.module.train()
 
             total_length = len(train_dataloader) // configs.gradient_accumulation_steps
             pbar = tqdm(
@@ -328,104 +347,12 @@ def main():
                 dynamic_ncols=True,
             )
 
-            for step, batch in enumerate(train_dataloader):
-
-                if step == 0 and wandb_run and rank == 0:
-                    print("logging training data")
-                    cur_bs = len(batch["input_ids"])
-                    text_str = ""
-                    for data_idx in range(cur_bs):
-                        for token_idx in range(len(batch["input_ids"][data_idx])):
-                            text_str += (
-                                str(batch["input_ids"][data_idx][token_idx].item())
-                                + " "
-                                + str(batch["labels"][data_idx][token_idx].item())
-                                + " "
-                                + tokenizer.decode(
-                                    batch["input_ids"][data_idx][token_idx]
-                                )
-                                + "\n"
-                            )
-                        text_str += "====" * 10 + "\n"
-                    text_table.add_data(total_train_steps, text_str)
-                    # copy the table due to a bug in wandb
-                    # https://github.com/wandb/wandb/issues/2981
-
-                    wandb_run.log({"data_table": copy(text_table)})
-
-                total_train_steps += 1
-                batch = {
-                    key: batch[key].to(local_rank) for key in batch.keys() if key != "idx"
-                }
-
-                outputs = parallel_model(**batch)
-
-                loss = outputs.loss / configs.gradient_accumulation_steps
-                loss.backward()
-
-                if (step + 1) % configs.gradient_accumulation_steps == 0 or step == len(
-                    train_dataloader
-                ) - 1:
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    pbar.update(1)
-
-                if wandb_run and rank == 0:
-                    log_dict = {
-                        "train/epoch": epoch + 1,
-                        "train/step": epoch * len(train_dataloader) + step,
-                        "train/loss": loss.detach().float()
-                        * configs.gradient_accumulation_steps,
-                    }
-                    wandb_run.log(log_dict)
-
-                pbar.set_description(
-                    f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
-                    f"completed (loss: {round(float(loss.detach().float() * configs.gradient_accumulation_steps), 4)}"
-                )
-            pbar.close()
-            dist.barrier()
-
-            if (
-                not configs.save_only_improve
-                and not configs.debug
-                and not configs.only_eval
-            ):
-                states = parallel_model.state_dict()
-                if rank == 0:
-                    torch.save(
-                        states, os.path.join(save_dir, f"checkpoint_{epoch + 1}")
-                    )
-                    print("saving model.")
-
-                dist.barrier()
-                del states
-                gc.collect()
-                torch.cuda.empty_cache()
-
-            # val loss
-            total_loss = 0
-
-            with torch.no_grad():
-                parallel_model.module.eval()
-                for step, batch in enumerate(valid_loss_dataloader):
-
-                    batch = {
-                        key: batch[key].to(local_rank) for key in batch.keys() if key != "idx"
-                    }
-
-                    outputs = parallel_model(**batch)
-                    loss = outputs.loss
-                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-                    total_loss += loss.item() / world_size
-
-                if wandb_run and rank == 0:
-
-                    log_dict = {
-                        "eval/loss": total_loss / len(valid_loss_dataloader),
-                    }
-                    wandb_run.log(log_dict)
-                    print("eval loss", total_loss / len(valid_loss_dataloader))
+            if not configs.grpo:
+                train_dl_style(configs, epoch, local_rank, optimizer, parallel_model, pbar, rank, save_dir, text_table,
+                           tokenizer, total_train_steps, train_dataloader, valid_loss_dataloader, wandb_run, world_size)
+            else:
+                train_grpo_style(configs, epoch, local_rank, parallel_model, pbar, rank, save_dir,
+                               tokenizer, total_train_steps, base_dataset_train, wandb_run, world_size, max_new_tokens)
 
         # val generation accuracy
         total_length = len(valid_gen_dataloader)
@@ -440,7 +367,11 @@ def main():
         )
 
         with torch.no_grad():
-            parallel_model.module.eval()
+            # check if parallel model has module (FSDP)
+            model_to_use = parallel_model
+            if hasattr(parallel_model, "module"):
+                model_to_use = parallel_model.module
+            model_to_use.eval()
             for idx, batch in enumerate(valid_gen_dataloader):
                 test_idx = batch["idx"][0]
 
@@ -459,10 +390,10 @@ def main():
                 total += 1
 
                 # synced_gpus=True in FSDP mode, as we need to keep # forward pass the same on each device
-                outputs = parallel_model.module.generate(
+                outputs = model_to_use.generate(
                     **batch,
                     max_new_tokens=max_new_tokens,
-                    synced_gpus=not configs.only_eval,
+                    synced_gpus=(not configs.only_eval and torch.cuda.is_available()),
                 )
 
                 text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -490,9 +421,10 @@ def main():
             pbar.close()
             print(f"Device {rank}: Cor={cor}, CoT={cor_cot}, Total={total}")
 
-        dist.all_reduce(cor_cot, op=dist.ReduceOp.SUM)
-        dist.all_reduce(cor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+        if torch.cuda.is_available():
+            dist.all_reduce(cor_cot, op=dist.ReduceOp.SUM)
+            dist.all_reduce(cor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total, op=dist.ReduceOp.SUM)
 
         cor_cot = cor_cot.item()
         cor = cor.item()
@@ -508,7 +440,8 @@ def main():
         if configs.only_eval:
             break
 
-        dist.barrier()
+        if torch.cuda.is_available():
+            dist.barrier()
         if (
             cor / total > best_acc
             and configs.save_only_improve
@@ -523,10 +456,115 @@ def main():
 
             best_acc = cor / total
 
-            dist.barrier()
+            if torch.cuda.is_available():
+                dist.barrier()
+                torch.cuda.empty_cache()
             del states
             gc.collect()
-            torch.cuda.empty_cache()
+
+
+def train_dl_style(configs: Config, epoch: int, local_rank: int, optimizer: Union[AdamW, None],
+                   parallel_model: Union[DDP, FSDP], pbar,
+                   rank: Union[Literal[0], int], save_dir: Union[LiteralString, str, bytes], text_table: Table, tokenizer,
+                   total_train_steps: int, train_dataloader: DataLoader[Any], valid_loss_dataloader: DataLoader[Any],
+                   wandb_run: Union[Run, None], world_size: int):
+    parallel_model.module.train()
+    for step, batch in enumerate(train_dataloader):
+
+        if step == 0 and wandb_run and rank == 0:
+            print("logging training data")
+            cur_bs = len(batch["input_ids"])
+            text_str = ""
+            for data_idx in range(cur_bs):
+                for token_idx in range(len(batch["input_ids"][data_idx])):
+                    text_str += (
+                            str(batch["input_ids"][data_idx][token_idx].item())
+                            + " "
+                            + str(batch["labels"][data_idx][token_idx].item())
+                            + " "
+                            + tokenizer.decode(
+                        batch["input_ids"][data_idx][token_idx]
+                    )
+                            + "\n"
+                    )
+                text_str += "====" * 10 + "\n"
+            text_table.add_data(total_train_steps, text_str)
+            # copy the table due to a bug in wandb
+            # https://github.com/wandb/wandb/issues/2981
+
+            wandb_run.log({"data_table": copy(text_table)})
+
+        total_train_steps += 1
+        batch = {
+            key: batch[key].to(local_rank) for key in batch.keys() if key != "idx"
+        }
+
+        outputs = parallel_model(**batch)
+
+        loss = outputs.loss / configs.gradient_accumulation_steps
+        loss.backward()
+
+        if (step + 1) % configs.gradient_accumulation_steps == 0 or step == len(
+                train_dataloader
+        ) - 1:
+            optimizer.step()
+            optimizer.zero_grad()
+            pbar.update(1)
+
+        if wandb_run and rank == 0:
+            log_dict = {
+                "train/epoch": epoch + 1,
+                "train/step": epoch * len(train_dataloader) + step,
+                "train/loss": loss.detach().float()
+                              * configs.gradient_accumulation_steps,
+            }
+            wandb_run.log(log_dict)
+
+        pbar.set_description(
+            f"Training Epoch: {epoch + 1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
+            f"completed (loss: {round(float(loss.detach().float() * configs.gradient_accumulation_steps), 4)}"
+        )
+    pbar.close()
+    dist.barrier()
+
+    if (
+            not configs.save_only_improve
+            and not configs.debug
+            and not configs.only_eval
+    ):
+        states = parallel_model.state_dict()
+        if rank == 0:
+            torch.save(
+                states, os.path.join(save_dir, f"checkpoint_{epoch + 1}")
+            )
+            print("saving model.")
+
+        dist.barrier()
+        del states
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # val loss
+    total_loss = 0
+
+    with torch.no_grad():
+        parallel_model.module.eval()
+        for step, batch in enumerate(valid_loss_dataloader):
+            batch = {
+                key: batch[key].to(local_rank) for key in batch.keys() if key != "idx"
+            }
+
+            outputs = parallel_model(**batch)
+            loss = outputs.loss
+            dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+            total_loss += loss.item() / world_size
+
+        if wandb_run and rank == 0:
+            log_dict = {
+                "eval/loss": total_loss / len(valid_loss_dataloader),
+            }
+            wandb_run.log(log_dict)
+            print("eval loss", total_loss / len(valid_loss_dataloader))
 
 
 if __name__ == "__main__":
