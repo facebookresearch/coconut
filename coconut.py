@@ -80,13 +80,20 @@ class Coconut(nn.Module):
 
             else:
                 # extract kv cache to reuse
-                past_key_values = [
-                    (
-                        k[:, :, : next_compute_range[0], :],
-                        v[:, :, : next_compute_range[0], :],
-                    )
-                    for k, v in kv_cache
-                ]
+                # modify the code so it is compatible with latest transformers repository
+                
+                for l, layer in enumerate(kv_cache.layers):
+                    kv_cache.layers[l].keys = layer.keys[:, :, : next_compute_range[0], :]
+                    kv_cache.layers[l].values = layer.values[:, :, : next_compute_range[0], :]
+                    
+                past_key_values =  kv_cache
+                # past_key_values = [
+                #     (
+                #         k[:, :, : next_compute_range[0], :],
+                #         v[:, :, : next_compute_range[0], :],
+                #     )
+                #     for k, v in kv_cache
+                # ]
 
                 outputs = self.base_causallm(
                     inputs_embeds=inputs_embeds[
@@ -120,7 +127,7 @@ class Coconut(nn.Module):
                 -1
             ]  # Get the last layer hidden states
             kv_cache = outputs.past_key_values
-
+            
             # feedback the continuous thoughts to the input_embeds
 
             # first decide the positions to feedback
@@ -157,26 +164,43 @@ class Coconut(nn.Module):
                 ]
             )
 
+
         # final pass
+        
+        for l, layer in enumerate(kv_cache.layers):
+            kv_cache.layers[l].keys = layer.keys[:, :, : next_compute_range[0], :]
+            kv_cache.layers[l].values = layer.values[:, :, : next_compute_range[0], :]
+        
+        
         outputs = self.base_causallm(
             inputs_embeds=inputs_embeds[
                 :, next_compute_range[0] : next_compute_range[1], :
             ],
             attention_mask=attention_mask[:, : next_compute_range[1]],
             position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
-            past_key_values=(
-                [
-                    (
-                        k[:, :, : next_compute_range[0], :],
-                        v[:, :, : next_compute_range[0], :],
-                    )
-                    for k, v in kv_cache
-                ]
-                if kv_cache
-                else None
-            ),
+            past_key_values= kv_cache if kv_cache else None,
             output_hidden_states=True,
         )
+        
+        # outputs = self.base_causallm(
+        #     inputs_embeds=inputs_embeds[
+        #         :, next_compute_range[0] : next_compute_range[1], :
+        #     ],
+        #     attention_mask=attention_mask[:, : next_compute_range[1]],
+        #     position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
+        #     past_key_values=(
+        #         [
+        #             (
+        #                 k[:, :, : next_compute_range[0], :],
+        #                 v[:, :, : next_compute_range[0], :],
+        #             )
+        #             for k, v in kv_cache
+        #         ]
+        #         if kv_cache
+        #         else None
+        #     ),
+        #     output_hidden_states=True,
+        # )
 
         logits.append(outputs.logits)
 
