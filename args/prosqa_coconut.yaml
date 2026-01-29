@@ -1,8 +1,11 @@
 # need 4 gpus
 
 project: coconut
-save_path: YOUR_PATH_TO_SAVE_THE_MODEL
+save_path: prosqa_experiments
 name: prosqa-coconut
+
+local: True
+local_path: /home/jmz/models--openai-community--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e
 
 only_eval: False
 

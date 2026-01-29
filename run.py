@@ -99,9 +99,13 @@ def main():
         print(
             f"Loading from {configs.load_model_path} and skip the first {configs.resume} epochs"
         )
-
-    model = AutoModelForCausalLM.from_pretrained(configs.model_id)
-    tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
+    if configs.local:
+        local_path = configs.local_path
+        model = AutoModelForCausalLM.from_pretrained(local_path, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(configs.model_name)
+        tokenizer = AutoTokenizer.from_pretrained(configs.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_tokens("<|start-latent|>")
     tokenizer.add_tokens("<|end-latent|>")

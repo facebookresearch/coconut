@@ -4,6 +4,9 @@ project: coconut
 save_path: YOUR_PATH_TO_SAVE_THE_MODEL
 name: gsm-coconut
 
+local: True
+local_path: /home/jmz/models--openai-community--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e
+
 only_eval: False
 
 coconut: True
@@ -19,7 +22,7 @@ pad_latent_to_max: True
 save_only_improve: False
 uniform_prob: 0.0
 model_id: openai-community/gpt2
-load_model_path: YOUR_PATH_TO_COT_CHECKPOINT
+load_model_path: YOUR_PATH_TO_SAVE_THE_MODEL/gsm-cot/checkpoint_22
 seed: 0
 resume: 3
 bf16: False
