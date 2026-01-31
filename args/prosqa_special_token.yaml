@@ -1,8 +1,8 @@
 # need 4 gpus
 
 project: coconut
-save_path: YOUR_PATH_TO_SAVE_THE_MODEL
-name: gsm-cot
+save_path: prosqa_experiments
+name: prosqa-special-token
 
 local: True
 local_path: /home/jmz/models--openai-community--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e
@@ -10,29 +10,29 @@ local_path: /home/jmz/models--openai-community--gpt2/snapshots/607a30d783dfa663c
 only_eval: False
 
 coconut: False
-special_token: False
-cot: True
+special_token: True
+cot: False
 no_thoughts: False
 no_cot: False
 
-c_thought: 0
-epochs_per_stage: 1
-max_latent_stage: 0
+c_thought: 2
+epochs_per_stage: 5
+max_latent_stage: 6
 pad_latent_to_max: True
 
-save_only_improve: True
+save_only_improve: False
 uniform_prob: 0.0
 model_id: openai-community/gpt2
 load_model_path: None
 seed: 0
 resume: 0
 bf16: False
-train_path: data/gsm_train.json
-val_path: data/gsm_valid.json
-reset_optimizer: False
+train_path: data/prosqa_train.json
+val_path: data/prosqa_valid.json
+reset_optimizer: True
 batch_size_training: 32
 debug: False
 gradient_accumulation_steps: 1
-num_epochs: 25
+num_epochs: 50
 lr: !!float "1e-4"
 weight_decay: 0.01

@@ -4,9 +4,13 @@ project: coconut
 save_path: YOUR_PATH_TO_SAVE_THE_MODEL
 name: prontoqa-coconut
 
+local: True
+local_path: /home/jmz/models--openai-community--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e
+
 only_eval: True
 
 coconut: True
+special_token: False
 cot: False
 no_thoughts: False
 no_cot: False

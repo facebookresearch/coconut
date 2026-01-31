@@ -1,3 +1,4 @@
 wandb/
 *checkpoint*
 *.pyc
+.vscode/

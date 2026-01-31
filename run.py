@@ -22,6 +22,7 @@ from dataset import (
     get_question_latent_dataset,
     get_cot_latent_dataset,
     MyCollator,
+    Special_Collator
 )
 
 from tqdm import tqdm
@@ -34,7 +35,6 @@ import gc
 import argparse
 import functools
 from utils import Config, set_seed
-
 
 def main():
 
@@ -242,7 +242,9 @@ def main():
     best_acc = 0
 
     collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
-
+    if configs.special_token:
+        collator = Special_Collator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
+        
     for epoch in range(configs.resume, configs.num_epochs):
 
         scheduled_stage = (
@@ -255,7 +257,7 @@ def main():
             start_id,
             latent_id,
             end_id,
-            no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
+            no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts or configs.special_token,
         )
 
         valid_gen_dataloader = torch.utils.data.DataLoader(
@@ -276,7 +278,7 @@ def main():
                 start_id,
                 latent_id,
                 end_id,
-                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
+                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts or configs.special_token,
                 shuffle=True,
             )
 
@@ -300,7 +302,7 @@ def main():
                 start_id,
                 latent_id,
                 end_id,
-                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
+                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts or configs.special_token,
             )
 
             valid_loss_dataloader = torch.utils.data.DataLoader(

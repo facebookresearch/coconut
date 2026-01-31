@@ -10,6 +10,7 @@ local_path: /home/jmz/models--openai-community--gpt2/snapshots/607a30d783dfa663c
 only_eval: False
 
 coconut: True
+special_token: False
 cot: False
 no_thoughts: False
 no_cot: False

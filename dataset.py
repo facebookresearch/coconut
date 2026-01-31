@@ -75,6 +75,53 @@ def get_dataset(path, tokenizer, max_size=1000000000):
 
     return dataset
 
+@dataclass
+class Special_Collator:
+
+    tokenizer: PreTrainedTokenizerBase
+    latent_id: Optional[int] = None
+    label_pad_token_id: Optional[int] = -100
+
+    def __call__(self, features, return_tensors=None):
+        assert self.tokenizer.padding_side == "right"
+        """
+        Pad the batch like normal way but exclude <|latent|> tokens from labeling.
+        """
+        input_ids = [torch.tensor(s["input_ids"], dtype=torch.long)
+            for s in features]
+        # 1. input_ids
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids,
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id
+        )
+        # 2. attention mask
+        attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
+        batch = {}
+        # 3. position_ids
+        position_ids = [torch.tensor(s["position_ids"], dtype=torch.long)
+            for s in features]
+        position_ids = torch.nn.utils.rnn.pad_sequence(
+            position_ids,
+            batch_first=True,
+            padding_value=0 # pad position id with 0    
+        )
+        batch["position_ids"] = position_ids
+        batch["input_ids"] = input_ids
+        batch["attention_mask"] = attention_mask
+
+        # 3. labels（causal LM）
+        if "labels" in features[0] or "label" in features[0]:
+            labels = [torch.tensor(s["labels"], dtype=torch.int64)
+                for s in features]
+            labels = torch.nn.utils.rnn.pad_sequence(
+                labels,
+                batch_first=True,
+                padding_value=self.label_pad_token_id
+            )
+            batch["labels"] = labels
+
+        return batch
 
 @dataclass
 class MyCollator:
