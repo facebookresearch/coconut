@@ -3,7 +3,8 @@ benchmark: "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu", "math", "gpqa", "
 # Model settings
 model:
   name: "Qwen/Qwen2.5-7B-Instruct"
-  max_new_tokens: 2056
+  max_new_tokens: 8192  # Raised from 2056 so reasoning models (Qwen3-8B etc.)
+                        # can finish long derivations instead of truncating mid-answer.
 
 # Experiment settings
 experiment:
@@ -27,7 +28,9 @@ sampling:
 
 # Checkpointing
 checkpoint:
-  interval: 100  # Save every N questions
+  interval: 50  # Save every N questions, so slow reasoning models (e.g. Qwen3-8B
+                # with thinking on) bank progress before the wall-clock limit and
+                # resume across resubmissions. Revisit once the O(n^2) decode is cached.
   # File name is auto-generated based on benchmark and model
 
 # Output directory

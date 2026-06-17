@@ -94,7 +94,9 @@ def setup_model(model_name: str):
         use_fast=True
     )
 
-    if "gpt-oss-20b" in model_name:
+    # Qwen3 is released in bfloat16; loading it in float16 overflows and yields
+    # inf/nan logits that crash multinomial sampling, so it needs bfloat16 too.
+    if "gpt-oss-20b" in model_name or "Qwen3" in model_name:
         dtype = torch.bfloat16
         print("Using bfloat16")
         base_model = AutoModelForCausalLM.from_pretrained(
@@ -159,14 +161,35 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
     elif benchmark == "mmlu":
         dataset = load_dataset("cais/mmlu", "all", split="test", trust_remote_code=True)
     elif benchmark == "math":
+        # MATH uses the 500-question Hendrycks test split only. The downstream
+        # cap (n = min(num_questions, total)) limits this to at most 500, so
+        # requesting more simply uses the full test split without switching
+        # sources. We report this split for MATH in the paper.
         dataset = load_dataset("nlile/hendrycks-MATH-benchmark", split="test")
     elif benchmark in ("gpqa", "gpqa-diamond", "gpqa-extended"):
-        config_map = {
-            "gpqa": "gpqa_main",
-            "gpqa-diamond": "gpqa_diamond",
-            "gpqa-extended": "gpqa_extended",
-        }
-        dataset = load_dataset("Idavidrein/gpqa", config_map[benchmark], split="train", trust_remote_code=True)
+        # GPQA is gated on the Hub, so we prefer the local normalized copy and
+        # only fetch from the Hub (which needs a token) when it is absent.
+        # data.download_benchmarks owns the fetch and schema normalization, and
+        # is a no-op when the file already exists, so this stays modular and
+        # works for a fresh user without a local cache.
+        import data
+        data_dir = Path(__file__).resolve().parent / "data"
+        local_path = data_dir / benchmark / "test.json"
+        if not local_path.exists():
+            data.download_benchmarks(data_dir=str(data_dir), benchmarks=[benchmark])
+        with open(local_path) as f:
+            rows = json.load(f)
+        # Remap the normalized schema to the raw column names the parser expects.
+        dataset = [
+            {
+                "Question": r["question"],
+                "Correct Answer": r["correct_answer"],
+                "Incorrect Answer 1": r["incorrect_answer_1"],
+                "Incorrect Answer 2": r["incorrect_answer_2"],
+                "Incorrect Answer 3": r["incorrect_answer_3"],
+            }
+            for r in rows
+        ]
     else:
         raise ValueError(
             f"Unknown benchmark: {benchmark}. "
@@ -212,13 +235,37 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
                 "correct_choice_idx": item["answer"]
             })
         elif benchmark == "math":
+            if "answer" in item:
+                # nlile format: answer is pre-extracted
+                answer = item["answer"]
+                level = item.get("level", "")
+                subject = item.get("subject", "")
+            else:
+                # qwedsacf format: extract answer from \boxed{} in solution
+                solution = item["solution"]
+                boxed_match = re.search(r'\\boxed\{', solution)
+                if boxed_match:
+                    start = boxed_match.end()
+                    depth = 1
+                    pos = start
+                    while pos < len(solution) and depth > 0:
+                        if solution[pos] == '{':
+                            depth += 1
+                        elif solution[pos] == '}':
+                            depth -= 1
+                        pos += 1
+                    answer = normalize_math_answer(solution[start:pos - 1]) if depth == 0 else ""
+                else:
+                    answer = ""
+                level = item.get("level", "").replace("Level ", "").strip()
+                subject = item.get("type", "")
             questions.append({
                 "question": item["problem"],
-                "answer": f"#### {item['answer']}",
+                "answer": f"#### {answer}",
                 "question_id": i,
                 "benchmark": "math",
-                "level": item.get("level", ""),
-                "subject": item.get("subject", "")
+                "level": level,
+                "subject": subject
             })
         else:  # gpqa variants
             # Shuffle the four options with a per-question seed for reproducibility
@@ -247,10 +294,18 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
 
 def normalize_math_answer(answer: str) -> str:
     """Normalize a LaTeX math answer string for comparison."""
-    answer = answer.strip().strip('$').strip()
+    answer = answer.strip()
+    # Strip markdown emphasis and LaTeX display/inline delimiters the model
+    # often wraps the answer in (e.g. "**$42$**" or "\[ \frac{3}{4} \]").
+    answer = answer.replace('**', '')
+    answer = re.sub(r'\\[\[\]()]', '', answer)      # \[ \] \( \)
+    answer = re.sub(r'\\boxed\s*\{(.*)\}\s*$', r'\1', answer)
+    answer = re.sub(r'\\text\s*\{([^}]*)\}', r'\1', answer)
     answer = re.sub(r'\\left', '', answer)
     answer = re.sub(r'\\right', '', answer)
+    answer = answer.strip().strip('$').strip()
     answer = re.sub(r'\s+', ' ', answer).strip()
+    answer = answer.rstrip('.').strip()
     return answer
 
 
@@ -272,41 +327,40 @@ def answers_match(predicted: str, expected: str, benchmark: str) -> bool:
 
 def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
     if benchmark in ("mmlu", "gpqa", "gpqa-diamond", "gpqa-extended"):
-        patterns = [
-            r'####\s*([A-D])',
-            r'[Tt]he answer is\s*([A-D])',
-            r'[Ss]o,?\s*the answer is\s*([A-D])',
-            r'[Hh]ence,?\s*the answer is\s*([A-D])',
-            r'[Tt]herefore,?\s*the answer is\s*([A-D])',
-            r'[Ff]inal answer[:\s]+([A-D])',
-            r'[Aa]nswer[:\s]+([A-D])',
-            r'[Cc]orrect answer is\s*([A-D])',
-        ]
+        # The model may wrap the answer letter in markdown bold, parentheses,
+        # dollar signs, or LaTeX (\boxed{}, \text{}, \[ \]). Allow any run of
+        # such wrappers between an answer cue and the A-D letter. The trailing
+        # \b stops us from matching a letter inside a word (e.g. "Avogadro").
+        OPEN = r'(?:\*{1,2}|\$|\(|\\boxed\s*\{|\\text\s*\{|\\mathbf\s*\{|\\\[|\\\(|\{|:|\s)*'
+        cue = (r'(?:####|'
+               r'(?i:(?:the\s+)?'
+               r'(?:final\s+answer|correct\s+(?:answer|option|choice)|answer|option|choice)'
+               r'\s*(?:is)?'
+               r'))')
+        combined = cue + r'[\s:]*' + OPEN + r'([A-D])\b'
+        # Take the LAST match: the model's concluding statement, not an earlier
+        # tentative mention or the restated prompt.
+        matches = list(re.finditer(combined, text))
+        if matches:
+            return matches[-1].group(1).upper()
 
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(1).upper()
-
-        last_portion = text[-500:] if len(text) > 500 else text
-        
-        final_patterns = [
-            r'is\s+([A-D])\s*[.,]',
-            r'\b([A-D])\s*\.\s*$', 
-        ]
-        
-        for pattern in final_patterns:
-            match = re.search(pattern, last_portion)
-            if match:
-                return match.group(1).upper()
+        # Fallbacks on the tail: a wrapped or trailing standalone letter.
+        tail = text[-400:]
+        for pattern in (r'\\boxed\s*\{\s*(?:\\text\s*\{\s*)?([A-D])',
+                        r'\*\*\(?([A-D])\)?\*\*',
+                        r'\(([A-D])\)',
+                        r'\b([A-D])\s*\.?\s*$'):
+            ms = list(re.finditer(pattern, tail))
+            if ms:
+                return ms[-1].group(1).upper()
 
         return "NO_ANSWER_FOUND"
 
     elif benchmark == "math":
-        # Extract content from \boxed{...}, handling nested braces
-        boxed_match = re.search(r'\\boxed\{', text)
-        if boxed_match:
-            start = boxed_match.end()
+        # Prefer the LAST \boxed{...} (the final answer), matching nested braces.
+        boxed_starts = [m.end() for m in re.finditer(r'\\boxed\s*\{', text)]
+        if boxed_starts:
+            start = boxed_starts[-1]
             depth = 1
             pos = start
             while pos < len(text) and depth > 0:
@@ -318,11 +372,17 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
             if depth == 0:
                 return normalize_math_answer(text[start:pos - 1])
 
-        # Fallback patterns
-        for pattern in [r'####\s*(.+?)(?:\n|$)', r'[Tt]he answer is[:\s]+(.+?)(?:\n|\.|$)', r'[Ff]inal answer[:\s]+(.+?)(?:\n|\.|$)']:
-            match = re.search(pattern, text)
-            if match:
-                return normalize_math_answer(match.group(1).strip())
+        # Fallback cue phrases, tolerating bold/LaTeX wrappers (handled by the
+        # normalizer). Take the LAST match.
+        for pattern in (r'####\s*(.+?)(?:\n|$)',
+                        r'(?i:(?:the\s+)?final\s+answer\s+is)[:\s]*(.+?)(?:\n|$)',
+                        r'(?i:(?:the\s+)?answer\s+is)[:\s]*(.+?)(?:\n|$)',
+                        r'(?i:final\s+answer)[:\s]*(.+?)(?:\n|$)'):
+            ms = list(re.finditer(pattern, text))
+            if ms:
+                cand = normalize_math_answer(ms[-1].group(1).strip())
+                if cand:
+                    return cand
 
         return "NO_ANSWER_FOUND"
 
@@ -373,10 +433,31 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
 def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int, model_name: str = "", benchmark: str = "gsm8k"):
     """Create input for Coconut model with latent reasoning markers."""
     
+    # Weaker instruction-followers (Llama, Mixtral) tend to reason at length and
+    # trail off on hard questions without ever committing to an answer, which the
+    # extractor scores as an abstention and collapses coverage accuracy. They need
+    # the same forceful, unambiguous closing directive.
+    needs_strict_format = any(m in model_name.lower() for m in ("llama", "mixtral"))
+
     if benchmark in ("mmlu", "gpqa", "gpqa-diamond", "gpqa-extended"):
-        instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer as 'The answer is X' where X is A, B, C, or D."
+        if needs_strict_format:
+            instruction = (
+                f"{question}\n\nSolve this step by step, keeping your reasoning concise. "
+                f"You MUST finish with a final line in exactly this format: 'The answer is X', "
+                f"where X is exactly one of the letters A, B, C, or D. "
+                f"Do not stop before writing that final line."
+            )
+        else:
+            instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer as 'The answer is X' where X is A, B, C, or D."
     elif benchmark == "math":
-        instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer using \\boxed{{}} notation."
+        if needs_strict_format:
+            instruction = (
+                f"{question}\n\nSolve this step by step, keeping your reasoning concise. "
+                f"You MUST finish with your final answer written as \\boxed{{ANSWER}}. "
+                f"Do not stop before writing the \\boxed{{}} answer."
+            )
+        else:
+            instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer using \\boxed{{}} notation."
     else:
         instruction = f"{question}\n\nPlease solve this step by step."
     
